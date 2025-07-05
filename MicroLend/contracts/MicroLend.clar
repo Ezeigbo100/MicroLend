@@ -218,4 +218,94 @@
     )
 )
 
+;; Advanced loan management function with liquidation and partial payments
+(define-public (manage-loan-advanced (loan-id uint) (action (string-ascii 20)) (amount uint))
+    (let
+        (
+            (loan-data (unwrap! (map-get? loans { loan-id: loan-id }) err-not-found))
+            (blocks-elapsed (- block-height (get start-block loan-data)))
+            (is-overdue (> blocks-elapsed (get duration-blocks loan-data)))
+            (current-interest (calculate-interest (get amount loan-data) (get interest-rate loan-data) blocks-elapsed))
+            (total-owed (+ (get amount loan-data) current-interest))
+            (caller-balance (get-balance tx-sender))
+        )
+        (if (is-eq action "partial-repay")
+            ;; Handle partial repayment
+            (if (and 
+                    (is-eq tx-sender (get borrower loan-data))
+                    (is-eq (get status loan-data) "active")
+                    (>= caller-balance amount)
+                    (> amount u0))
+                (begin
+                    ;; Transfer partial payment to lender
+                    (set-balance tx-sender (- caller-balance amount))
+                    (set-balance (get lender loan-data) 
+                        (+ (get-balance (get lender loan-data)) amount))
+                    ;; Update loan with partial repayment
+                    (map-set loans
+                        { loan-id: loan-id }
+                        (merge loan-data {
+                            total-repaid: (+ (get total-repaid loan-data) amount)
+                        })
+                    )
+                    (ok amount)
+                )
+                err-insufficient-funds
+            )
+            (if (is-eq action "liquidate")
+                ;; Handle liquidation for overdue loans
+                (if (and 
+                        (is-eq tx-sender (get lender loan-data))
+                        (is-eq (get status loan-data) "active")
+                        is-overdue)
+                    (begin
+                        ;; Transfer collateral to lender as compensation
+                        (set-balance (get lender loan-data) 
+                            (+ (get-balance (get lender loan-data)) (get collateral-amount loan-data)))
+                        ;; Mark loan as defaulted
+                        (map-set loans
+                            { loan-id: loan-id }
+                            (merge loan-data {
+                                status: "defaulted"
+                            })
+                        )
+                        (ok (get collateral-amount loan-data))
+                    )
+                    err-unauthorized
+                )
+                (if (is-eq action "extend")
+                    ;; Handle loan term extension
+                    (if (and 
+                            (is-eq tx-sender (get borrower loan-data))
+                            (is-eq (get status loan-data) "active")
+                            (> amount u0))
+                        (begin
+                            ;; Extend loan duration and charge extension fee
+                            (let ((extension-fee (/ (get amount loan-data) u20))) ;; 5% extension fee
+                                (if (>= caller-balance extension-fee)
+                                    (begin
+                                        (set-balance tx-sender (- caller-balance extension-fee))
+                                        (set-balance (get lender loan-data) 
+                                            (+ (get-balance (get lender loan-data)) extension-fee))
+                                        (map-set loans
+                                            { loan-id: loan-id }
+                                            (merge loan-data {
+                                                duration-blocks: (+ (get duration-blocks loan-data) amount)
+                                            })
+                                        )
+                                        (ok amount)
+                                    )
+                                    err-insufficient-funds
+                                )
+                            )
+                        )
+                        err-unauthorized
+                    )
+                    err-not-found
+                )
+            )
+        )
+    )
+)
+
 
